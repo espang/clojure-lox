@@ -1,6 +1,13 @@
 (ns clojure-lox.scanner)
 
-(def eof (char 0))
+(def ^:const eof (char 0))
+
+(def ^:const keywords
+  (->> ["and" "class" "else" "false" "for" "fun" "if" "nil"
+        "or" "print" "return" "super" "this" "true" "var"
+        "while"]
+       (map (fn [name] [name (keyword (str "token/" name))]))
+       (into {})))
 
 (defn alpha? [c]
   (or (= \_ c)
@@ -120,7 +127,7 @@
 
         :else
         (-> sc
-            (add-token (make-token :token-number
+            (add-token (make-token :token/number
                                    (Double/parseDouble
                                     (apply str (subvec content
                                                        current
@@ -128,8 +135,19 @@
                                    line))
             (assoc :current index))))))
 
-(defn scan-identifier [sc]
-  sc)
+(defn scan-identifier
+  [{:keys [content current line] :as sc}]
+  (loop [index current]
+    (let [c (char-at content index)]
+      (if (alpha? c)
+        (recur (inc index))
+        (let [lexeme  (apply str (subvec content current index))
+              tk-type (get keywords lexeme :token/identifier)]
+          (-> sc
+              (add-token (make-token tk-type
+                                     lexeme
+                                     line))
+              (assoc :current index)))))))
 
 (defn scan-token [{:keys [content current line] :as sc}]
   (let [c  (char-at content current)
@@ -216,6 +234,8 @@
    :literal nil
    :line 1}
 
+
+
   (-> (scanner "*()//hello")
       scan-tokens)
   (->> (scanner "*()//hello\n{}")
@@ -234,7 +254,7 @@
        scan-tokens
        :tokens
        (map token->str))
-  (-> (scanner "\"hello\" 123.4567")
+  (-> (scanner "\"hello\" 123.4567 var vary")
       (scan-tokens true)
       :tokens
       (as-> tks (map token->str tks)))
