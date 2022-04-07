@@ -69,13 +69,12 @@
       (add-token token)
       advance))
 
-(defn consume-line-comment [{:keys [current content line] :as sc}]
+(defn consume-line-comment [{:keys [current content] :as sc}]
   (loop [index current]
     (let [c (char-at content index)]
       (if (or (= eof c) (= \newline c))
         (-> sc
-            (assoc :current (inc index))
-            (update :line (fnil inc 1)))
+            (assoc :current index))
         (recur (inc index))))))
 
 (defn scan-string [{:keys [line current content] :as sc}]
