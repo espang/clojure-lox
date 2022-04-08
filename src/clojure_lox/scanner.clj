@@ -47,53 +47,40 @@
                           last
                           :token-type)))))
 
-(defn error
+(defn error-msg
   "adds an error the scanner and returns the scanner"
-  [sc line message]
-  (update sc :errors
-          (fnil conj [])
-          (str "[line " line "] Error: " message)))
+  [line message]
+  (str "[line " line "] Error: " message))
 
-(defn advance
-  "advances the scanner to a new character"
-  ([sc]
-   (advance sc 1))
-  ([sc n]
-   (update sc :current (fnil + 0) n)))
+(defn add-error [sc error-msg]
+  (update sc :errors (fnil conj []) error-msg))
 
 (defn add-token [sc token]
   (update sc :tokens (fnil conj []) token))
 
-(defn add-token-and-advance [sc token]
-  (-> sc
-      (add-token token)
-      advance))
-
-(defn consume-line-comment [{:keys [current content] :as sc}]
-  (loop [index current]
+(defn scan-line-comment [from content]
+  (loop [index from]
     (let [c (char-at content index)]
-      (if (or (= eof c) (= \newline c))
-        (-> sc
-            (assoc :current index))
+      (if (or (= c eof)
+              (= c \newline))
+        [index (apply str (subvec content from index))]
         (recur (inc index))))))
 
-(defn scan-string [{:keys [line current content] :as sc}]
-  (loop [index   (inc current)
-         line    line
+(defn scan-string [from content]
+  (loop [index   (inc from)
+         line    0
          escaped false]
     (let [c (char-at content index)]
       (cond
         (and (not escaped)
              (= \" c))
-        (-> sc
-            (add-token (make-token :token/string
-                                   (apply str (subvec content
-                                                      (inc current)
-                                                      index))
-                                   line))
-            (assoc :line line)
-            (assoc :current (inc index)))
-
+        [:ok
+         (inc index)
+         (apply str (subvec content
+                            (inc from)
+                            index))
+         line]
+        
         (= \\ c)
         (recur (inc index) line (not escaped))
 
@@ -101,7 +88,7 @@
         (recur (inc index) (inc line) escaped)
 
         (= eof c)
-        (error sc line "unterminated string.")
+        [:error/unterminated-string]
 
         :else
         (recur (inc index) line escaped)))))
@@ -110,9 +97,8 @@
   "Numbers can be integer of floating point numbers. Numbers
   can't start with or end with a dot. So '123' and '0.123' are
   valid numbers."
-  [{:keys [content current line] :as sc}]
-  (loop [index      current
-         ;; is the scanner scanning the fraction?
+  [from content]
+  (loop [index from
          fractional false]
     (let [c (char-at content index)]
       (cond
@@ -125,84 +111,107 @@
         (recur (inc index) true)
 
         :else
-        (-> sc
-            (add-token (make-token :token/number
-                                   (Double/parseDouble
-                                    (apply str (subvec content
-                                                       current
-                                                       index)))
-                                   line))
-            (assoc :current index))))))
+        [index
+         (Double/parseDouble
+          (apply str (subvec content from index)))]))))
 
 (defn scan-identifier
-  [{:keys [content current line] :as sc}]
-  (loop [index current]
+  [from content]
+  (loop [index from]
     (let [c (char-at content index)]
       (if (alpha? c)
         (recur (inc index))
-        (let [lexeme  (apply str (subvec content current index))
-              tk-type (get keywords lexeme :token/identifier)]
-          (-> sc
-              (add-token (make-token tk-type
-                                     lexeme
-                                     line))
-              (assoc :current index)))))))
+        [index
+         (apply str (subvec content from index))]))))
+
+(defn scan-next-token
+  "returns the next token as a triple of the index after the token,
+  the token and optionally the lexeme and the lines spanned. Returns
+  nil and an error-code for errors."
+  [from content]
+  (let [c      (char-at content from)
+        nc     (char-at content (inc from))
+        result (case c
+                 eof {:token :token/eof}
+                 \(  {:token :token/left-paren}
+                 \)  {:token :token/right-paren}
+                 \{  {:token :token/left-brace}
+                 \}  {:token :token/right-brace}
+                 \,  {:token :token/comma}
+                 \.  {:token :token/dot}
+                 \-  {:token :token/minus}
+                 \+  {:token :token/plus}
+                 \;  {:token :token/semicolon}
+                 \*  {:token :token/star}
+                 \!  (if (= \= nc)
+                       {:token :token/bank-equal
+                        :after (+ from 2)}
+                       {:token :token/bang})
+                 \= (if (= \= nc)
+                      {:token :token/equal-equal
+                       :after (+ from 2)}
+                      {:token :token/equal})
+                 \< (if (= \= nc)
+                      {:token :token/less-equal
+                       :after (+ from 2)}
+                      {:token :token/less})
+                 \> (if (= \= nc)
+                      {:token :token/greater-equal
+                       :after (+ from 2)}
+                      {:token :token/greater})
+                 \/ (if (= \/ nc)
+                      (let [[after _] (scan-line-comment from content)]
+                        {:token :ignore
+                         :after after})
+                      {:token :token/slash})
+                 \space {:token :ignore}
+                 \tab {:token :ignore}
+                 \return {:token :ignore}
+                 \newline {:token :ignore
+                           :span-lines 1}
+                 \" (let [[error-code after lexeme span-lines] (scan-string from content)]
+                      (case error-code
+                        :ok {:token :token/string
+                             :value lexeme
+                             :span-lines span-lines
+                             :after after}
+                        :else {:error error-code}))
+                 (cond
+                   (Character/isDigit c)
+                   (let [[after number] (scan-number from content)]
+                     {:token :token/number
+                      :value number
+                      :after after})
+                   
+                   (alpha? c)
+                   (let [[after value] (scan-identifier from content)
+                         token-type    (get keywords value :token/identifier)]
+                     {:token token-type
+                      :value value
+                      :after after})
+                   
+                   (= eof c)
+                   {:token :token/eof}
+
+                   :else
+                   {:error :error/unexpected-token
+                    :value c}))]
+    (merge {:after (inc from)
+            :span-lines 0}
+           result)))
 
 (defn scan-token [{:keys [content current line] :as sc}]
-  (let [c  (char-at content current)
-        nc (char-at content (inc current))]
-    (case c
-      eof (add-token sc (make-token :token/eof line))
-      \( (add-token-and-advance sc (make-token :token/left-paren line))
-      \) (add-token-and-advance sc (make-token :token/right-paren line))
-      \{ (add-token-and-advance sc (make-token :token/left-brace line))
-      \} (add-token-and-advance sc (make-token :token/right-brace line))
-      \, (add-token-and-advance sc (make-token :token/comma line))
-      \. (add-token-and-advance sc (make-token :token/dot line))
-      \- (add-token-and-advance sc (make-token :token/minus line))
-      \+ (add-token-and-advance sc (make-token :token/plus line))
-      \; (add-token-and-advance sc (make-token :token/semicolon line))
-      \* (add-token-and-advance sc (make-token :token/star line))
-      \! (if (= \= nc)
-           (-> sc
-               (add-token (make-token :token/bang-equal line))
-               (advance 2))
-           (add-token-and-advance sc (make-token :token/bang line)))
-      \= (if (= \= nc)
-           (-> sc
-               (add-token (make-token :token/equal-equal line))
-               (advance 2))
-           (add-token-and-advance sc (make-token :token/equal line)))
-      \< (if (= \= nc)
-           (-> sc
-               (add-token (make-token :token/less-equal line))
-               (advance 2))
-           (add-token-and-advance sc (make-token :token/less line)))
-      \> (if (= \= nc)
-           (-> sc
-               (add-token (make-token :token/greater-equal line))
-               (advance 2))
-           (add-token-and-advance sc (make-token :token/greater line)))
-      \/ (if (= \/ nc)
-           ;; is comment
-           (consume-line-comment sc)
-           (add-token-and-advance sc (make-token :token/slash line)))
-      \space (advance sc)
-      \tab (advance sc)
-      \return (advance sc)
-      \newline (-> sc
-                   (update :line (fnil inc 1))
-                   advance)
-      \" (scan-string sc)
-      (cond
-        (Character/isDigit c)
-        (scan-number sc)
-
-        (alpha? c)
-        (scan-identifier sc)
-
-        :else
-        (error sc line (str "unexpected token '" c "'"))))))
+  (let [{:keys [after error span-lines token value]} (scan-next-token current content)]
+    (if (nil? error)
+      (cond-> (-> sc
+                  (assoc :current after)
+                  (update :line + span-lines))
+        (not= :ignore token)
+        (add-token (make-token token value line)))
+      (add-error sc 
+                 (case error
+                   :error/unterminated-string (error-msg line "unterminated string." )
+                   :error/unexpected-token    (error-msg line (str "unexpected character '" value "'")))))))
 
 (defn debug-step [sc]
   (let [sc'       (scan-token sc)
@@ -226,49 +235,9 @@
             debug))))
 
 (comment
-  ; the first token of 
-  ; var language = "lox";
-  {:token-type :token/var
-   :lexeme "var"
-   :literal nil
-   :line 1}
-
-
-
   (-> (scanner "*()//hello")
       scan-tokens)
-  (->> (scanner "*()//hello\n{}")
-       scan-tokens
-       :tokens
-       (map token->str))
-  (->> (scanner "*() \n {}")
-       scan-tokens
-       :tokens
-       (map token->str))
-  (->> (scanner ">=>!!=<<=")
-       scan-tokens
-       :tokens
-       (map token->str))
-  (->> (scanner "\"hello\"")
-       scan-tokens
-       :tokens
-       (map token->str))
   (-> (scanner "\"hello\" 123.4567 var vary")
       (scan-tokens true)
       :tokens
-      (as-> tks (map token->str tks)))
-  
-  (-> {:current 0 :content (vec "123")}
-      scan-number
-      :tokens
-      first)
-  (-> {:current 0 :content (vec "123.12")}
-      scan-number
-      :tokens
-      first)
-  (-> {:current 0 :content (vec "123.12.12")}
-      scan-number
-      :tokens
-      first)
-
-  ) 
+      (as-> tks (map token->str tks)))) 
