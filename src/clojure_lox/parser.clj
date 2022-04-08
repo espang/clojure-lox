@@ -66,25 +66,90 @@
   {:tokens  tokens
    :current 0})
 
-(defn next-token-matches-any [{:keys [tokens current]} & tokens]
+(defn is-at-end? [{:keys [current tokens]}]
   (boolean
-   (some #{(:token-type (nth tokens current {}))}
-         tokens)))
+   (or (>= current (count tokens))
+       (= :token/eof (nth tokens current)))))
 
-(defn advance [{:keys [current tokens] :as pa}]
-  (let [tk (nth tokens current)]
+(defn next-token [{:keys [current tokens] :as pa}]
+  (if (is-at-end? pa)
+    {:token-type :token/eof}
+    (nth tokens current)))
+
+(defn next-token-matches-any
+  "returns false when parser at or behind the last EOF token."
+  [pa token-types]
+  (boolean
+   (some #{(:token-type (next-token pa))}
+         token-types)))
+
+(defn advance [pa]
+  (let [tk (next-token pa)]
     [tk (update pa :current inc)]))
 
-(defn equality 
-  ([pa]
-   (let [[expr pa'] (comparison pa)]
-     (equality pa' expr)))
+(defn first-expr [self f pa]
+  (let [[expr pa'] (f pa)]
+    (self pa' expr)))
+
+(defn next-exprs [self f pa expr & tokens]
+  (if (next-token-matches-any pa tokens)
+     (let [[operator pa'] (advance pa)
+           [right pa'']   (f pa')]
+       (self pa'' (make-binary expr operator right)))
+     [expr pa]))
+
+(declare expression)
+
+;; TODO: error handling in the inner case!!!
+(defn primary [pa]
+  (let [[{:keys [token-type lexeme]} pa'] (advance pa)]
+    (case token-type
+      :token/false  [(make-literal false) pa']
+      :token/true   [(make-literal true) pa']
+      :token/nil    [(make-literal nil) pa']
+      :token/number [(make-literal lexeme) pa']
+      :token/string [(make-literal lexeme) pa']
+      :token/left-paren
+      (let [[expr pa''] (expression pa')
+            [closing pa'''] (advance pa'')]
+        (case closing
+          :token/right-paren
+          [(make-grouping expr) pa'''])))))
+
+(defn unary [pa]
+  (if (next-token-matches-any pa [:token/bang :token/minus])
+    (let [[operator pa'] (advance pa)
+          [right pa'']   (unary pa')]
+      [(make-unary operator right) pa''])
+    (primary pa)))
+
+(defn factor
+  ([pa] (first-expr factor unary pa))
   ([pa expr]
-   (if (next-token-matches-any pa :token/bang-equal :token/equal-equal)
-     (let [[operator pa'] (advance pa)]
-       )))
-  (let [expr (comparison pa)]
-    ))
+   (next-exprs factor unary pa expr
+               :token/slash
+               :token/star)))
+
+(defn term
+  ([pa] (first-expr term factor pa))
+  ([pa expr]
+   (next-exprs term factor pa expr :token/minus :token/plus)))
+
+(defn comparison
+  ([pa] (first-expr comparison term pa))
+  ([pa expr]
+   (next-exprs comparison term pa expr
+               :token/greater
+               :token/greater-equal
+               :token/less
+               :token/less-equal)))
+
+(defn equality 
+  ([pa] (first-expr equality comparison pa))
+  ([pa expr]
+   (next-exprs equality comparison pa expr
+               :token/bang-equal
+               :token/equal-equal)))
 
 (defn expression [pa] (equality pa))
 
