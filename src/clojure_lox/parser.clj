@@ -27,6 +27,11 @@
    :operator operator
    :right right})
 
+(defn make-error [error-code meta]
+  {:expr-type :expr/parse-error
+   :error error-code
+   :meta meta})
+
 (defmulti printer :expr-type)
 
 (defn parenthesize [s & exprs]
@@ -57,8 +62,6 @@
   [{:keys [right operator]}]
   (parenthesize (:lexeme operator)
                 right))
-
-
 
 ;; --- Parser ---
 
@@ -114,7 +117,13 @@
             [closing pa'''] (advance pa'')]
         (case closing
           :token/right-paren
-          [(make-grouping expr) pa'''])))))
+          [(make-grouping expr) pa''']
+          ;;else
+          [(make-error :unexpected-token
+                       {:token-type closing}) pa''']))
+      ;;else
+      [(make-error :unexpected-token
+                   {:token-type token-type}) pa'])))
 
 (defn unary [pa]
   (if (next-token-matches-any pa [:token/bang :token/minus])
@@ -152,6 +161,24 @@
                :token/equal-equal)))
 
 (defn expression [pa] (equality pa))
+
+(defn synchronize [pa]
+  (let [[previous pa'] (advance pa)
+        tt (next-token pa')]
+    (if (or (= :token/eof previous)
+            (= :token/semicolon previous))
+      pa'
+      (case tt
+        :token/class pa'
+        :token/fun pa'
+        :token/var pa'
+        :token/for pa'
+        :token/if pa'
+        :token/while pa'
+        :token/print pa'
+        :token/return pa'
+
+        :else (recur pa')))))
 
 (defn parse [pa]
   )
